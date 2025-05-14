@@ -1,0 +1,174 @@
+#include <ESP8266WiFi.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <ArduinoJson.h>
+#include <ESP8266HTTPClient.h>
+//#include "secrets.h"
+
+// === WiFi Info ===
+const char* ssid = "yourSSID";
+const char* password = "yourPASSWORD";
+
+// === API Info ===
+const String API_KEY = "your API KEY HERE";
+const String LAT = "your LATITUDE ";
+const String LON = "YOUR LONGITUDE";
+const String API_URL = "http://api.ipgeolocation.io/astronomy?apiKey=" + API_KEY + "&lat=" + LAT + "&long=" + LON;
+
+// === LCD Setup ===
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// === Pins ===
+const int buttonPin = D4;
+const int ledPin = D3;
+
+// === Variables ===
+int page = 0;
+int lastPage = -1;
+bool lastButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+unsigned long lastUpdate = 0;
+const unsigned long updateInterval = 60000;  // every 60 sec
+
+// === Data from API ===
+float moonAz = 0.0;
+float moonAlt = 0.0;
+float moonDist = 0.0;
+float sunAlt = 0.0;
+String dateStr = "";
+String sunriseStr = "";
+String sunsetStr = "";
+int ledBrightness = 0;
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(D2, D1); // SDA, SCL for I2C on WeMos D1 Mini
+  lcd.init();
+  lcd.backlight();
+
+  pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(ledPin, OUTPUT);
+  analogWriteFreq(500);
+  analogWriteRange(255);
+
+  lcd.setCursor(0, 0);
+  lcd.print("Connecting WiFi");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  lcd.clear();
+  lcd.print("WiFi connected");
+  delay(1000);
+  lcd.clear();
+}
+
+void loop() {
+  handleButton();
+
+  if (millis() - lastUpdate > updateInterval || lastUpdate == 0) {
+    fetchData();
+    lastUpdate = millis();
+  }
+
+  if (page != lastPage) {
+    displayPage(page);
+    lastPage = page;
+  }
+
+  delay(100);
+}
+
+void handleButton() {
+  bool buttonState = digitalRead(buttonPin);
+  if (buttonState == LOW && lastButtonState == HIGH && millis() - lastDebounceTime > 300) {
+    page = (page + 1) % 4;
+    lastDebounceTime = millis();
+  }
+  lastButtonState = buttonState;
+}
+
+void fetchData() {
+  HTTPClient http;
+  WiFiClient client;
+  http.begin(client, API_URL);
+  int httpCode = http.GET();
+
+  if (httpCode > 0) {
+    String payload = http.getString();
+    Serial.println(payload);
+
+    DynamicJsonDocument doc(1024);
+    DeserializationError error = deserializeJson(doc, payload);
+
+    if (!error) {
+      moonAz = doc["moon_azimuth"].as<float>();
+      moonAlt = doc["moon_altitude"].as<float>();
+      moonDist = doc["moon_distance"].as<float>();
+
+      sunAlt = doc["sun_altitude"].as<float>();
+      dateStr = doc["date"].as<String>();
+      sunriseStr = doc["sunrise"].as<String>();
+      sunsetStr = doc["sunset"].as<String>();
+
+      updateSunLed(sunAlt);
+    } else {
+      Serial.println("JSON parse failed");
+    }
+  } else {
+    Serial.println("HTTP error");
+  }
+
+  http.end();
+}
+
+void updateSunLed(float alt) {
+  ledBrightness = 0;
+  if (alt > 0) {
+    ledBrightness = map((int)alt, 0, 90, 30, 255);  // Avoid complete dark
+  }
+  analogWrite(ledPin, ledBrightness);
+}
+
+void displayPage(int p) {
+  lcd.clear();
+  switch (p) {
+    case 0:
+    lcd.setCursor(0, 0);
+    lcd.print("Moon Az:");
+    lcd.print(moonAz, 1);
+    lcd.setCursor(0, 1);
+    lcd.print("Alt:");
+    lcd.print(moonAlt, 1);
+    break;
+
+  case 1:
+    lcd.setCursor(0, 0);
+    lcd.print("Moon Dist:");
+    lcd.print((int)moonDist);
+    lcd.setCursor(0, 1);
+    lcd.print("Date: ");
+    lcd.print(dateStr.substring(5));  // MM-DD
+    break;
+
+  case 2:
+    lcd.setCursor(0, 0);
+    lcd.print("Sunrise: ");
+    lcd.print(sunriseStr);
+    lcd.setCursor(0, 1);
+    lcd.print("Sunset:  ");
+    lcd.print(sunsetStr);
+    break;
+
+  case 3:
+    lcd.setCursor(0, 0);
+    lcd.print("Sun Alt:");
+    lcd.print(sunAlt, 1);
+    lcd.setCursor(0, 1);
+    lcd.print("LED PWM:");
+    lcd.print(ledBrightness);
+    break;
+  }
+}
